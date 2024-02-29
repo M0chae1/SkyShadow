@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+import argparse
 import logging
 import os
 import shutil
@@ -26,10 +27,12 @@ class Bcolors:
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 class ImportDlls(threading.Thread):
-    def __init__(self,queue,dll_list):
+    def __init__(self,queue,dll_list,output,limit):
         threading.Thread.__init__(self)
         self.queue = queue
         self.dll_list = dll_list
+        self.output = output
+        self.limit = limit
 
     def run(self):
         while not self.queue.empty():
@@ -47,9 +50,9 @@ class ImportDlls(threading.Thread):
             logging.error("不支持.NET程序")
             return []
 
-        if pe.OPTIONAL_HEADER.Subsystem == 2:
-            logging.error("不支持GUI程序")
-            return []
+        # if pe.OPTIONAL_HEADER.Subsystem == 2:
+        #     logging.error("不支持GUI程序")
+        #     return []
 
         machine = pe.FILE_HEADER.Machine
         if machine == pefile.MACHINE_TYPE['IMAGE_FILE_MACHINE_I386']:
@@ -64,20 +67,41 @@ class ImportDlls(threading.Thread):
                 import_table.append((dll_name, imports,arch))
         return import_table
 
-    def generate_export_functions(self,exe_info, dll, arch):
+    def generate_export_functions(self,exe_info, dll):
         exe_name, exe_path = exe_info
-        destination_directory = os.path.join("dllInject", f"{arch}_{exe_name}")
+        importDllName,importDllFunc,arch = dll
+        destination_directory = os.path.join(self.output, f"{arch}_{exe_name}")
 
         try:
             os.makedirs(destination_directory, exist_ok=True)
             destination_file = os.path.join(destination_directory, exe_name)
             shutil.copyfile(os.path.join(exe_path, exe_name), destination_file)
 
-            dll_name = dll[0].replace(".dll", ".cpp")
+            dll_name = importDllName.replace(".dll", ".cpp")
             with open(os.path.join(destination_directory, dll_name), "w") as f:
-                for item in dll[1]:
-                    payload = 'extern "C" __declspec(dllexport) int ' + item + '() { return 0; }\n'
+                f.write("#include <windows.h>\n\n")
+                for item in importDllFunc:
+                    payload = 'extern "C" __declspec(dllexport) void ' + item + '() {}\n'
                     f.write(payload)
+
+                f.write("\n")
+                f.write("""
+BOOL APIENTRY DllMain(HMODULE hModule,
+    DWORD  ul_reason_for_call,
+    LPVOID lpReserved
+)
+{
+    switch (ul_reason_for_call)
+    {
+    case DLL_PROCESS_ATTACH:
+    case DLL_THREAD_ATTACH:
+    case DLL_THREAD_DETACH:
+    case DLL_PROCESS_DETACH:
+        break;
+    }
+    return TRUE;
+}
+""")
 
             logging.info(f"{dll_name} 导出函数生成成功")
         except PermissionError:
@@ -88,21 +112,20 @@ class ImportDlls(threading.Thread):
     def check_imported_dlls(self,exe_info, dll_list):
         exe_name, exe_path = exe_info
         import_table = self.get_import_table_for_exe(exe_path, exe_name,dll_list)
-        if len(import_table)>0:
+        if len(import_table)>0 and len(import_table) <= self.limit:
             for dll in import_table:
                 dll_name = dll[0]
-                arch = dll[2]
                 dll_path = os.path.join(exe_path, dll_name)
                 if os.path.exists(dll_path) and dll_name in dll_list:
-                    self.generate_export_functions(exe_info,dll,arch)
-def scan_directory(path):
+                    self.generate_export_functions(exe_info,dll)
+def scan_directory(path,savePath,limit):
     dll_list = []
     queue = Queue()
     try:
         for file_name in os.listdir(path):
             file_path = os.path.join(path, file_name)
             if os.path.isdir(file_path):
-                scan_directory(file_path)
+                scan_directory(file_path,savePath,limit)
             elif file_name.endswith('.dll'):
                 dll_list.append(file_name)
             elif file_name.endswith('.exe'):
@@ -111,7 +134,7 @@ def scan_directory(path):
 
         threads = []
         for i in range(5):
-            threads.append(ImportDlls(queue, dll_list))
+            threads.append(ImportDlls(queue, dll_list,savePath,limit))
         for t in threads:
             t.start()
         for t in threads:
@@ -125,16 +148,30 @@ def scan_directory(path):
         logging.error(f"发生了错误, Error: {e}")
 
 
+def parse_options():
+    parser = argparse.ArgumentParser(description="Scan a file for imported DLLs and limit the number of imports to analyze.")
+    parser.add_argument('-f', '--file', dest="file_path", type=str, help='Path to the file to be scanned.')
+    parser.add_argument('-o', '--output', dest="output_path", type=str, default="dllInject", help='Output directory path.')
+    parser.add_argument("-l", '--limit', dest="import_limit", type=int, default=1, help="Limit the number of imported DLLs to analyze.")
+    args = parser.parse_args()
+    return args
 
 def main():
     print(f'\n')
     print(
         f'{Bcolors.Green}▌║█║▌│║▌│║▌║▌█║ {Bcolors.Red}SkyShadow{Bcolors.White} v{__version__}{Bcolors.Green} ▌│║▌║▌│║║▌█║▌║█{Bcolors.Endc}\n')
 
-    if (len(sys.argv) == 2):
-        scan_directory(sys.argv[1])
-    else:
-        print('Usage: python SkyShadow.py "D:/"')
+
+    cmd_args = parse_options()
+    path = cmd_args.file_path
+    savePath = cmd_args.output_path
+    limit = cmd_args.import_limit
+    scan_directory(path,savePath,limit)
+
+    # if (len(sys.argv) == 2):
+    #     scan_directory(sys.argv[1],"dllInject",1)
+    # else:
+    #     print('Usage: python SkyShadow.py "D:/"')
 
 if __name__ == '__main__':
     try:
